@@ -23,9 +23,33 @@ Example output:
 
 Provide your response in JSON format:"""
 
+article_summarizer_instructions="""
+<GOAL>
+Generate High-quality Notes on the following article. Do Not explain what the artyicle is about, but rather
+extract pertinent facts from the article and list them as statements in  a concise manner. Include as much detail as possible but keep the facts concise and relevant to the user's topic.
+Only provide notes on the article do not inject your own opinion or analysis.
+</GOAL>
+
+<REQUIREMENTS>
+When creating the listy of notes:
+1. Highlight the most relevant information related to the user topic from the search results
+2. Ensure a coherent flow of information
+3. utilize a condensed format to keep the summary concise
+4. Ensure all information is relevant to the user's topic
+5. Omit Verbiage that is irrelevant to the user's topic
+6. Do not include your own opinion or analysis
+7. Do not include refereneces to the article or the author
+8. Do not include links or references to other articles or sources
+< /REQUIREMENTS >
+
+< FORMATTING >
+- Start directly with the notes, without preamble or titles or explianations of what the author is talking about. Do not use XML tags in the output.
+< /FORMATTING >
+"""
+
 summarizer_instructions="""
 <GOAL>
-Generate a high-quality summary of the web search results and keep it concise / related to the user topic.
+Generate a high-quality notes of the article and keep it concise / related to the user topic.
 </GOAL>
 
 <REQUIREMENTS>

@@ -8,9 +8,12 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import START, END, StateGraph
 
 from assistant.configuration import Configuration, SearchAPI
-from assistant.utils import deduplicate_and_format_sources, tavily_search, format_sources, perplexity_search, duckduckgo_search
+from assistant.utils import deduplicate_sources, deduplicate_and_format_sources, tavily_search, format_sources, perplexity_search, duckduckgo_search, searxng_search
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, article_summarizer_instructions
+from langchain_community.document_loaders import PyPDFLoader
+from dotenv import load_dotenv
+import os
 
 # Nodes
 def generate_query(state: SummaryState, config: RunnableConfig):
@@ -21,7 +24,8 @@ def generate_query(state: SummaryState, config: RunnableConfig):
 
     # Generate a query
     configurable = Configuration.from_runnable_config(config)
-    llm_json_mode = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0, format="json")
+    llm_json_mode = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0,
+                    num_predict=configurable.num_predictions, num_ctx=configurable.num_ctx, format="json")
     result = llm_json_mode.invoke(
         [SystemMessage(content=query_writer_instructions_formatted),
         HumanMessage(content=f"Generate a query for web search:")]
@@ -44,20 +48,72 @@ def web_research(state: SummaryState, config: RunnableConfig):
     else:
         search_api = configurable.search_api.value
 
-    # Search the web
-    if search_api == "tavily":
-        search_results = tavily_search(state.search_query, include_raw_content=True, max_results=1)
-        search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000, include_raw_content=True)
-    elif search_api == "perplexity":
-        search_results = perplexity_search(state.search_query, state.research_loop_count)
-        search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000, include_raw_content=False)
-    elif search_api == "duckduckgo":
-        search_results = duckduckgo_search(state.search_query, max_results=3, fetch_full_page=configurable.fetch_full_page)
-        search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000, include_raw_content=True)
-    else:
-        raise ValueError(f"Unsupported search API: {configurable.search_api}")
+    # Determine the structure of search_query
+    if isinstance(state.search_query, dict) and "queries" in state.search_query:
+        # multiple queries structured in a dictionary
+        queries = state.search_query["queries"]
+    elif isinstance(state.search_query, dict):
+        # single query structured in a dictionary
+        queries = [{"query": state.search_query["query"]}]
+    else:   # non structured query, ie just a string
+        queries = [{"query": state.search_query}]
 
-    return {"sources_gathered": [format_sources(search_results)], "research_loop_count": state.research_loop_count + 1, "web_research_results": [search_str]}
+    all_search_results = []
+    all_search_strs = []
+
+    for query in queries:
+        search_query = query["query"]
+        
+        # Search the web
+        if search_api == "tavily":
+            search_results = tavily_search(state.search_query, include_raw_content=True, max_results=1)
+            #search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=int(configurable.max_tokens_per_source), include_raw_content=True)
+        elif search_api == "perplexity":
+            search_results = perplexity_search(state.search_query, state.research_loop_count)
+            #search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=int(configurable.max_tokens_per_source), include_raw_content=False)
+        elif search_api == "duckduckgo":
+            search_results = duckduckgo_search(state.search_query, max_results=int(configurable.max_search_results), fetch_full_page=configurable.fetch_full_page)
+            #search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=int(configurable.max_tokens_per_source), include_raw_content=True)
+        elif search_api == "searxng":
+             search_results = searxng_search(state.search_query, max_results=int(configurable.max_search_results), fetch_full_page=configurable.fetch_full_page)
+            #search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=int(configurable.max_tokens_per_source), include_raw_content=True)
+        else:
+            raise ValueError(f"Unsupported search API: {configurable.search_api}")
+        
+        search_results = deduplicate_sources(search_results)
+        # search_str = summarize_article_content(search_results, state, config)
+        
+        # Assuming that the search results are in the  form of a dDict containing a 'results'
+        # key with a list of search results
+        
+        all_search_results.append(search_results)        
+        
+        result_list = search_results['results']
+        for result in result_list:
+            #content = summarize_article_content(result.get('raw_content', result['content']), state, config)
+            #result['content'] = content
+            all_search_strs.append(result.get('raw_content'))
+                            
+    return {"sources_gathered": [format_sources(all_search_results)], "research_loop_count": state.research_loop_count + 1, "web_research_results": [all_search_strs]}
+
+def summarize_article_content(article_content: str, state: SummaryState, config: RunnableConfig):
+    
+    # Build the human message
+    human_message_content = (
+        f"<User Input> \n {state.research_topic} \n <User Input>\n\n"
+        f"<Article> \n {article_content} \n <Article>\n\n"
+    )
+         
+    # Run the LLM
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0,
+                     num_predict=configurable.num_predictions, num_ctx=configurable.num_ctx)
+    result = llm.invoke(
+        [SystemMessage(content=article_summarizer_instructions),
+        HumanMessage(content=human_message_content)]
+    )
+  
+    return result.content
 
 def summarize_sources(state: SummaryState, config: RunnableConfig):
     """ Summarize the gathered sources """
@@ -83,7 +139,8 @@ def summarize_sources(state: SummaryState, config: RunnableConfig):
 
     # Run the LLM
     configurable = Configuration.from_runnable_config(config)
-    llm = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0)
+    llm = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0,
+                     num_predict=configurable.num_predictions, num_ctx=configurable.num_ctx)
     result = llm.invoke(
         [SystemMessage(content=summarizer_instructions),
         HumanMessage(content=human_message_content)]
@@ -105,7 +162,8 @@ def reflect_on_summary(state: SummaryState, config: RunnableConfig):
 
     # Generate a query
     configurable = Configuration.from_runnable_config(config)
-    llm_json_mode = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0, format="json")
+    llm_json_mode = ChatOllama(base_url=configurable.ollama_base_url, model=configurable.local_llm, temperature=0, num_predict=configurable.num_predictions, num_ctx=configurable.num_ctx, format="json")
+    
     result = llm_json_mode.invoke(
         [SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic)),
         HumanMessage(content=f"Identify a knowledge gap and generate a follow-up web search query based on our existing knowledge: {state.running_summary}")]
@@ -158,3 +216,21 @@ builder.add_conditional_edges("reflect_on_summary", route_research)
 builder.add_edge("finalize_summary", END)
 
 graph = builder.compile()
+
+def run_agent( research_topic : str ):
+    """ Run the agent """
+    # Load environment variables from a .env file
+    load_dotenv()
+
+    # query = input("Enter your question (or type /exit to quit): ")
+    # if query.lower() == "/exit":
+    #    break
+    
+    state = SummaryState(research_topic=research_topic, search_query="", running_summary="", research_loop_count=0, sources_gathered=[], web_research_results=[])
+
+    state = graph.invoke(state)
+
+    return state
+
+if __name__ == "__main__":
+    print ( run_agent("Advances in Attention Layers in Large Language Models") )
